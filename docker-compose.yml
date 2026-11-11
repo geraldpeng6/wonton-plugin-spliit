@@ -33,6 +33,10 @@ services:
       # 公网地址：群组链接等对外地址按它拼，核心注入的网页地址不含路径。
       BASE_URL: ${WONTON_APP_URL}
       TZ: ${TZ}
+      # 上游 server.js 自带的配置项：Node 默认 5 秒关掉空闲 keep-alive 连接，比核心网关
+      # 转发池的复用窗口短，空闲连接被上游先关会让带请求体的 POST 撞上死连接（502）。
+      # 拉长后空闲连接由网关先关（转发池 1 秒空闲即回收）。
+      KEEP_ALIVE_TIMEOUT: "120000"
     depends_on:
       db:
         condition: service_healthy

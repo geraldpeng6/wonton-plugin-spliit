@@ -29,8 +29,9 @@ web_origin() {
 # 首页 hero 文案（messages/en-US.json 的 Homepage.metaTitle），网关错误页不会有它。
 web_assert() { grep -q 'Share Expenses with Friends'; }
 
-IDENTITY_NA=1
-SMOKE_NOTE="Spliit 没有用户/账号体系（tRPC 全部匿名 baseProcedure，群组靠链接分享）；身份由网关保证，匿名访问被 401 挡住"
+# 套件按 source 一起读这几个值，export 让 shellcheck 认它们被用。
+export IDENTITY_NA=1
+export SMOKE_NOTE="Spliit 没有用户/账号体系（tRPC 全部匿名 baseProcedure，群组靠链接分享）；身份由网关保证，匿名访问被 401 挡住"
 
 # tRPC 的返回是 [{result:{data:{json:…}}}]；批量请求体是 {"0":{"json":<superjson input>}}。
 _trpc_get() { # <procedure> <input JSON>：带会话 GET，输出响应体
@@ -43,7 +44,29 @@ _trpc_post() { # <procedure> <input JSON>：带会话 POST，输出响应体
     -d "{\"0\":{\"json\":$2}}" "$(web_origin)/api/trpc/$1?batch=1"
 }
 
+# 刚装好/重装后，核心登记的插件状态要先回到 running+healthy 再发数据请求：装完接口返回
+# 不代表网关到应用的转发路径已经按新容器就绪。轮询核心自己的插件接口（真实就绪信号，最多 60 秒），
+# 不是对失败请求重试。
+wait_plugin_ready() {
+  local waited=0
+  while (( waited < 60 )); do
+    if smoke_api GET /_wonton/api/plugins 2>/dev/null | python3 -c '
+import json, sys
+plugins = json.load(sys.stdin)["plugins"]
+p = next((p for p in plugins if p["id"] == "app.spliit.spliit"), {})
+s = p.get("status") or {}
+raise SystemExit(0 if s.get("state") == "running" and s.get("health") == "healthy" else 1)' 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "等了 60 秒核心还没把插件标成 running healthy"
+  return 1
+}
+
 data_write() {
+  wait_plugin_ready || return 1
   local marker="wonton-$RANDOM$RANDOM$RANDOM" resp gid pid1 pid2 eid
   resp="$(_trpc_post groups.create "{\"groupFormValues\":{\"name\":\"Smoke $marker\",\"currency\":\"USD\",\"currencyCode\":\"USD\",\"participants\":[{\"name\":\"Alice\"},{\"name\":\"Bob\"}]}}")" \
     || { echo "建群失败：$resp"; return 1; }
@@ -67,6 +90,7 @@ print(ps[0]["id"], ps[1]["id"])' <<<"$resp")" \
 }
 
 data_check() {
+  wait_plugin_ready || return 1
   local gid eid marker resp
   read -r gid eid marker <"$SMOKE_STATE"
   resp="$(_trpc_get groups.expenses.list "{\"groupId\":\"$gid\",\"limit\":100}")" \
