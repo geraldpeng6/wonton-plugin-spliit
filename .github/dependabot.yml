@@ -5,3 +5,7 @@ updates:
     directory: /
     schedule:
       interval: daily
+    # postgres 大版本之间要迁移数据，自动升上去会读不出主人的数据；大版本手动升。
+    ignore:
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]

@@ -1,61 +1,79 @@
 # shellcheck shell=bash
-# scripts/smoke.sh 的一项一项探测，跟着插件走。没写的项会 FAIL 并给出写法，不会默认放行。
+# scripts/smoke.sh 的插件探针。
 #
-# 变量别叫 state：shellcheck 把这份文件连着 probes.sh 一起分析，probes.sh 自己也读一个 dev.sh 提供的 state；
-# 子壳体函数（fn() ( … )）里给 state 赋值，SC2031 就报在 probes.sh 上，CI 红。
+# Spliit 没有账号体系：打开网页即用，群组靠链接分享，身份完全由云吞网关保证，
+# 所以 identity_check 写 IDENTITY_NA=1（原因见 SMOKE_NOTE）。
+# 数据探针走应用自己的 tRPC 接口（/api/trpc，superjson）：建带随机标记的群和账单，重装后读回。
 #
-# 变量：SMOKE_WEB_URL 是应用的网页入口（套件已去尾斜杠，但可能带路径，比如 SSO 登录页）；
-#       拼 API 路径用 SMOKE_WEB_ORIGIN（只有 scheme://host:port，入口的路径不掺进来），别直接接在 SMOKE_WEB_URL 后面。
-#
-# 页面：web_assert 从标准输入读页面，命中的确是应用的真实页面时返回 0。
-# 身份：identity_check 只证明身份：用应用自己的“当前用户”接口断言认出的是用户管理员，不碰应用里的数据。
-#       数据断言（是否配置过、有几条、内容对不对）全部交给 data_write / data_check：冒烟第 1 项会先装升级
-#       起点写数据，身份探针再断言“数据目录是空的”就会红。接口回字段时也只看类型（如 configured 是布尔、
-#       nodes 是数字），值和条数留给 data_check。
-#       没有用户体系时写 IDENTITY_NA=1，并在 SMOKE_NOTE 里写原因。dweb / web_get 是带用户会话的请求助手，可继续走应用自己的登录链。
-#       SSO 登录跳转不用自己写表单逻辑：dweb --sso 会从清单 webui.path 的入口出发（没写就是 /），提交核心
-#       登录页的 JS 自动表单并跟完重定向，返回的页面已带应用的登录态。
-# 工具：MCP_TOOL 写一个只读工具名（可带插件前缀），MCP_ARGS 是 JSON 参数；mcp_assert 从标准输入读调用结果。
-#       要断言多个工具时改成写 mcp_check；调用前要备数据时写 before_mcp。
-# 通知房间：申请了 notify 的插件把通知交给核心，核心以核心账号发进和主人的“Wonton”私聊。
-#       探针以主人身份读这个房间：probes_owner_room_wait <超时秒> <要找的文字> 等到开始之后发来的、包含这段文字的
-#       消息就返回 0，超时列出看到的最新消息并返回非 0。要先把等待挂到后台再发通知，否则消息可能在等待开始前就到：
-#         room_wait() {
-#           local marker="probe-$RANDOM" url
-#           url="$(docker exec "wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--web" printenv WONTON_NOTIFY_URL)"
-#           probes_owner_room_wait 120 "$marker" & local pid=$!
-#           docker exec "wonton-$SMOKE_INSTANCE--${SMOKE_PLUGIN_ID//./-}--web" wget -q -O /dev/null \
-#             --header 'Content-Type: application/json' --post-data "{\"title\":\"$marker\"}" "$url"
-#           wait "$pid"
-#         }
-#       上面的 web 换成插件里能发 HTTP 的服务；wget 换成那个服务里有的客户端。
-# 数据：合并前要验证“升级/重装不丢用户数据”时写 data_write 和 data_check（两个都写才跑）：data_write 用随机标记写
-#       一条数据并把标记原样存进 $SMOKE_STATE，data_check 读回标记去应用里找，对不上就打印看到了什么并返回非 0。
-#       应用不存用户数据时写 DATA_NA=1（两项记 N/A）。
-# 装之前要准备（如先配出口代理）：写 before_install。
-
-web_assert() { grep -q '你好'; }   # 示例页的标题
-
-identity_check() { # 页面回显的就是网关注入的用户名；示例页不存数据，也不拿数据判断身份
-  local page
-  page="$(dweb /)" || { echo "页面失败：$page"; return 1; }
-  grep -qF "你好，$SMOKE_OWNER" <<<"$page" || { echo "页面没回显用户 $SMOKE_OWNER：$(head -c 120 <<<"$page")"; return 1; }
+# 变量：SMOKE_WEB_URL 应用网页入口；拼 API 路径用 SMOKE_WEB_ORIGIN。
+# tRPC 请求要过网关，带核心会话 cookie（-b "$SMOKE_JAR"）；curl 默认不带 Origin/Sec-Fetch-*，
+# 网关对无 Origin 的请求按同源处理（插件规范“网关代登录”一节）。
+# dev.sh probes 只给 smoke_api/会话助手，不注入 SMOKE_WEB_URL；真正的 smoke 套件才注入。
+# 优先用套件给的 SMOKE_WEB_URL/SMOKE_WEB_ORIGIN，没有就从核心的插件列表拿网页地址推导 origin。
+web_origin() {
+  if [[ -n "${SMOKE_WEB_URL:-}" ]]; then
+    echo "${SMOKE_WEB_ORIGIN:-${SMOKE_WEB_URL%/}}"
+    return
+  fi
+  local url scheme host
+  if [[ -z "${_WEB_ORIGIN:-}" ]]; then
+    url="$(smoke_api GET /_wonton/api/plugins | jq -r '.plugins[] | select(.id=="app.spliit.spliit") | .web_url // ""')"
+    url="${url%/}"
+    scheme="${url%%://*}"
+    host="${url#"$scheme"://}"
+    _WEB_ORIGIN="$scheme://${host%%[/?#]*}"
+  fi
+  echo "$_WEB_ORIGIN"
 }
 
-# 数据：合并前要验证“升级/重装不丢用户数据”时写 data_write 和 data_check（两个都写才跑）：
-#   data_write 用随机标记写一条数据，把标记原样覆盖写进 $SMOKE_STATE（一个已建好的空文件，不是目录）；data_check 读回标记、去应用里找，
-#   找不到就打印看到了什么并返回非 0。
-# 应用不存用户数据时写 DATA_NA=1（两项记 N/A）。模板的示例页不存数据，所以这里是不适用。
-# 数据要写进插件容器时（Agent 插件的工作区标记等），容器名别自己拼：钩子契约里没有 SMOKE_SLUG，e2e 套件的
-# data_write 又跑在实例名导出之前，拼出来的名字缺段（No such container）；Bot 服务（清单声明了 bots）每个 Bot
-# 一组容器，名字还带 --<Bot 名> 后缀。按核心打的标签找，插件自带 smoke 和 e2e 套件两个运行环境都成立
-# （实例名没导出时按 SMOKE_BASE 的主机名第一段推）：
-#   _container() { # <插件 id> <服务名>：本实例里这个服务的容器
-#     local inst="${SMOKE_INSTANCE:-}" args=(--filter "label=wonton.plugin=$1" --filter "label=wonton.service=$2")
-#     if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
-#       inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
-#     fi
-#     [[ -z "$inst" ]] || args+=(--filter "label=wonton.instance=${inst//-/}")
-#     docker ps --format '{{.Names}}' "${args[@]}" | head -1
-#   }
-export DATA_NA=1
+# 首页 hero 文案（messages/en-US.json 的 Homepage.metaTitle），网关错误页不会有它。
+web_assert() { grep -q 'Share Expenses with Friends'; }
+
+IDENTITY_NA=1
+SMOKE_NOTE="Spliit 没有用户/账号体系（tRPC 全部匿名 baseProcedure，群组靠链接分享）；身份由网关保证，匿名访问被 401 挡住"
+
+# tRPC 的返回是 [{result:{data:{json:…}}}]；批量请求体是 {"0":{"json":<superjson input>}}。
+_trpc_get() { # <procedure> <input JSON>：带会话 GET，输出响应体
+  curl -fsS -b "$SMOKE_JAR" -G "$(web_origin)/api/trpc/$1" \
+    --data-urlencode "batch=1" --data-urlencode "input={\"0\":{\"json\":$2}}"
+}
+
+_trpc_post() { # <procedure> <input JSON>：带会话 POST，输出响应体
+  curl -fsS -b "$SMOKE_JAR" -H 'Content-Type: application/json' \
+    -d "{\"0\":{\"json\":$2}}" "$(web_origin)/api/trpc/$1?batch=1"
+}
+
+data_write() {
+  local marker="wonton-$RANDOM$RANDOM$RANDOM" resp gid pid1 pid2 eid
+  resp="$(_trpc_post groups.create "{\"groupFormValues\":{\"name\":\"Smoke $marker\",\"currency\":\"USD\",\"currencyCode\":\"USD\",\"participants\":[{\"name\":\"Alice\"},{\"name\":\"Bob\"}]}}")" \
+    || { echo "建群失败：$resp"; return 1; }
+  gid="$(python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["result"]["data"]["json"]["groupId"])' <<<"$resp")" \
+    || { echo "解析群 id 失败：$resp"; return 1; }
+
+  resp="$(_trpc_get groups.get "{\"groupId\":\"$gid\"}")" \
+    || { echo "查群失败：$resp"; return 1; }
+  read -r pid1 pid2 <<<"$(python3 -c '
+import json,sys
+ps = json.load(sys.stdin)[0]["result"]["data"]["json"]["group"]["participants"]
+print(ps[0]["id"], ps[1]["id"])' <<<"$resp")" \
+    || { echo "解析成员 id 失败：$resp"; return 1; }
+
+  resp="$(_trpc_post groups.expenses.create "{\"groupId\":\"$gid\",\"expenseFormValues\":{\"expenseDate\":\"2026-01-01\",\"title\":\"Smoke $marker\",\"amount\":23.45,\"paidBy\":\"$pid1\",\"paidFor\":[{\"participant\":\"$pid2\",\"shares\":1}],\"splitMode\":\"EVENLY\",\"saveDefaultSplittingOptions\":false,\"isReimbursement\":false,\"documents\":[]}}")" \
+    || { echo "记账失败：$resp"; return 1; }
+  eid="$(python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["result"]["data"]["json"]["expenseId"])' <<<"$resp")" \
+    || { echo "解析账单 id 失败：$resp"; return 1; }
+
+  printf '%s\n' "$gid $eid $marker" >"$SMOKE_STATE"
+}
+
+data_check() {
+  local gid eid marker resp
+  read -r gid eid marker <"$SMOKE_STATE"
+  resp="$(_trpc_get groups.expenses.list "{\"groupId\":\"$gid\",\"limit\":100}")" \
+    || { echo "查账单失败：$resp"; return 1; }
+  if grep -qF "$marker" <<<"$resp"; then
+    return 0
+  fi
+  echo "重装后找不到标记 $marker（群 $gid 账单 $eid），看到的：$(head -c 300 <<<"$resp")"
+  return 1
+}
