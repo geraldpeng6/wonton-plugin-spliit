@@ -44,24 +44,31 @@ _trpc_post() { # <procedure> <input JSON>：带会话 POST，输出响应体
     -d "{\"0\":{\"json\":$2}}" "$(web_origin)/api/trpc/$1?batch=1"
 }
 
-# 刚装好/重装后，核心登记的插件状态要先回到 running+healthy 再发数据请求：装完接口返回
-# 不代表网关到应用的转发路径已经按新容器就绪。轮询核心自己的插件接口（真实就绪信号，最多 60 秒），
-# 不是对失败请求重试。
+# 刚装好/重装后网关到应用的转发路径要过十几秒才稳（核心自己也有十几秒收尾，官方冒烟实测 memos
+# 就在这窗口 502）：发数据请求前等两个真实就绪信号，都满足才继续，不对失败请求重试——
+# 1) 网关把应用首页真的服务出来（带会话 GET，页面特征命中；就是官方冒烟"等首页稳定 200"的做法）；
+# 2) 核心把插件标成 running healthy（核心自己的插件接口）。
+# 最多等 90 秒，超时如实报错停下。
 wait_plugin_ready() {
-  local waited=0
-  while (( waited < 60 )); do
-    if smoke_api GET /_wonton/api/plugins 2>/dev/null | python3 -c '
+  local waited=0 page ok
+  while (( waited < 90 )); do
+    page="$(curl -sS --noproxy '*' -m 10 -b "$SMOKE_JAR" "$(web_origin)/" 2>/dev/null || true)"
+    ok=0
+    if [[ -n "$page" ]] && web_assert <<<"$page" 2>/dev/null; then
+      if smoke_api GET /_wonton/api/plugins 2>/dev/null | python3 -c '
 import json, sys
 plugins = json.load(sys.stdin)["plugins"]
 p = next((p for p in plugins if p["id"] == "app.spliit.spliit"), {})
 s = p.get("status") or {}
 raise SystemExit(0 if s.get("state") == "running" and s.get("health") == "healthy" else 1)' 2>/dev/null; then
-      return 0
+        ok=1
+      fi
     fi
-    sleep 1
-    waited=$((waited + 1))
+    (( ok == 1 )) && return 0
+    sleep 2
+    waited=$((waited + 2))
   done
-  echo "等了 60 秒核心还没把插件标成 running healthy"
+  echo "等了 90 秒应用页面经网关还打不开或核心没把插件标成 running healthy"
   return 1
 }
 
