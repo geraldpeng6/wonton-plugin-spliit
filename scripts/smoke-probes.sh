@@ -44,32 +44,20 @@ _trpc_post() { # <procedure> <input JSON>：带会话 POST，输出响应体
     -d "{\"0\":{\"json\":$2}}" "$(web_origin)/api/trpc/$1?batch=1"
 }
 
-# 刚装好/重装后网关到应用的转发路径要过十几秒才稳（核心自己也有十几秒收尾，官方冒烟实测 memos
-# 就在这窗口 502）：发数据请求前等两个真实就绪信号，都满足才继续，不对失败请求重试——
-# 1) 网关把应用首页真的服务出来（页面特征命中；就是官方冒烟"等首页稳定 200"的做法）；
-# 2) 核心把插件标成 running healthy（核心自己的插件接口）。
-# 会话不能用现成的：核心重建后旧会话失效，且核心登录发的 cookie 只对核心域名有效，插件域名的
-# 会话要经 dweb 的完整登录链重拿。每轮删掉 jar 让 dweb 重新走（dweb 两套套件都有，自带登录跳转）。
-# 最多等 90 秒（按墙钟），超时如实报错停下。
+# 发数据请求前等应用首页经网关稳定服务出来（真实就绪信号，就是官方冒烟"等首页稳定 200"的做法；
+# 核心装完有十几秒收尾，官方冒烟实测 memos 在这窗口 502，套件自己只护第 2 项，这里对数据项再护一遍）。
+# 会话交给 dweb：jar 有效就复用，没有才走完整登录链（两套套件都有，行为一致）。不删、不改 SMOKE_JAR：
+# 正式套件的 jar 是它建好交给我们用的，删了在 e2e 里就再也登不进。按墙钟最多 90 秒，超时如实报错。
 wait_plugin_ready() {
-  [[ -n "${SMOKE_JAR:-}" ]] || { echo "缺冒烟变量：SMOKE_JAR" >&2; return 1; }
   local deadline=$((SECONDS + 90)) page
   while (( SECONDS < deadline )); do
-    rm -f "$SMOKE_JAR"
     page="$(dweb / 2>/dev/null || true)"
     if [[ -n "$page" ]] && web_assert <<<"$page" 2>/dev/null; then
-      if smoke_api GET /_wonton/api/plugins 2>/dev/null | python3 -c '
-import json, sys
-plugins = json.load(sys.stdin)["plugins"]
-p = next((p for p in plugins if p["id"] == "app.spliit.spliit"), {})
-s = p.get("status") or {}
-raise SystemExit(0 if s.get("state") == "running" and s.get("health") == "healthy" else 1)' 2>/dev/null; then
-        return 0
-      fi
+      return 0
     fi
     sleep 2
   done
-  echo "等了 90 秒应用页面经网关还打不开或核心没把插件标成 running healthy"
+  echo "等了 90 秒应用首页经网关还没稳定服务出来（dweb + 首页特征都没命中）"
   return 1
 }
 
