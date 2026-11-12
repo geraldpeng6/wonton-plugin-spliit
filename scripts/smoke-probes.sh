@@ -46,18 +46,17 @@ _trpc_post() { # <procedure> <input JSON>：带会话 POST，输出响应体
 
 # 刚装好/重装后网关到应用的转发路径要过十几秒才稳（核心自己也有十几秒收尾，官方冒烟实测 memos
 # 就在这窗口 502）：发数据请求前等两个真实就绪信号，都满足才继续，不对失败请求重试——
-# 1) 网关把应用首页真的服务出来（带会话 GET，页面特征命中；就是官方冒烟"等首页稳定 200"的做法）；
+# 1) 网关把应用首页真的服务出来（页面特征命中；就是官方冒烟"等首页稳定 200"的做法）；
 # 2) 核心把插件标成 running healthy（核心自己的插件接口）。
-# 会话先刷新：正式套件第 6 项会先重装，核心重建后旧会话失效（SMOKE_JAR 里是死 cookie），
-# 主人令牌（SMOKE_TOKEN）是静态凭据，重新 POST 登进核心换新会话。最多等 90 秒，超时如实报错停下。
+# 会话不能用现成的：核心重建后旧会话失效，且核心登录发的 cookie 只对核心域名有效，插件域名的
+# 会话要经 dweb 的完整登录链重拿。每轮删掉 jar 让 dweb 重新走（dweb 两套套件都有，自带登录跳转）。
+# 最多等 90 秒（按墙钟），超时如实报错停下。
 wait_plugin_ready() {
-  [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_BASE:-}" && -n "${SMOKE_TOKEN:-}" ]] ||
-    { echo "缺冒烟变量：需要 SMOKE_JAR/SMOKE_BASE/SMOKE_TOKEN" >&2; return 1; }
+  [[ -n "${SMOKE_JAR:-}" ]] || { echo "缺冒烟变量：SMOKE_JAR" >&2; return 1; }
   local deadline=$((SECONDS + 90)) page
   while (( SECONDS < deadline )); do
-    curl -sS --noproxy '*' -m 10 -o /dev/null -b "$SMOKE_JAR" -c "$SMOKE_JAR" \
-      --data-urlencode "token=$SMOKE_TOKEN" "$SMOKE_BASE/_wonton/login" 2>/dev/null || true
-    page="$(curl -sS --noproxy '*' -m 10 -b "$SMOKE_JAR" "$(web_origin)/" 2>/dev/null || true)"
+    rm -f "$SMOKE_JAR"
+    page="$(dweb / 2>/dev/null || true)"
     if [[ -n "$page" ]] && web_assert <<<"$page" 2>/dev/null; then
       if smoke_api GET /_wonton/api/plugins 2>/dev/null | python3 -c '
 import json, sys
