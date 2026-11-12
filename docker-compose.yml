@@ -51,7 +51,7 @@ services:
 x-wonton:
   spec: "0.11"
   id: app.spliit.spliit
-  version: 0.1.0
+  version: 0.1.1
   kind: app
   title:
     zh: AA 记账（Spliit）
@@ -90,15 +90,13 @@ x-wonton:
 
       Known limits: group deletion and receipt scanning (needs OpenAI) follow the upstream default and are off; currency conversion is fetched by your device's browser from a public rates service.
   release_notes:
-    zh: "首个版本：Spliit 1.30.0。"
-    en: "First release: Spliit 1.30.0."
+    zh: "清单去掉 webui.friends，应用本身不变；好友分享照常可用。"
+    en: "Drop webui.friends from the manifest; the app is unchanged and friend sharing still works."
   webui:
     service: web
     port: 3000
     # 应用没有账号体系，打开即用；网关挡在前面，陌生人进不来。
     sso: none
-    # 群组链接要发给家里人以外的人（同行朋友），声明好友分享。
-    friends: true
   tabs:
     - id: home
       title: { zh: 记账, en: Expenses }
