@@ -7,7 +7,7 @@ services:
     # postgres:17.6-alpine3.22，官方镜像多架构 index 摘要（docker buildx imagetools inspect）。
     # 版本照上游 e2e 实测用的 postgres 17 系（上游 compose.yaml 写 latest，不采）。
     # 大版本升级要迁移数据，dependabot.yml 里已忽略 postgres 的大版本。
-    image: postgres:17.6-alpine3.22@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    image: postgres:17.10-alpine3.22@sha256:b02d9b5bcf608c2719da32cdabee274a33841202487fd5dc9b065b63f886753f
     # 官方 postgres alpine 镜像的 postgres 用户固定 uid 999，镜像不认 PUID/PGID；
     # 按数据目录属主规则写数字 uid:gid，数据目录直接归 999，initdb 免 chown。
     user: "999:999"
