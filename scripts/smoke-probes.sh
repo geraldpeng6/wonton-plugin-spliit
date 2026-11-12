@@ -48,12 +48,16 @@ _trpc_post() { # <procedure> <input JSON>：带会话 POST，输出响应体
 # 就在这窗口 502）：发数据请求前等两个真实就绪信号，都满足才继续，不对失败请求重试——
 # 1) 网关把应用首页真的服务出来（带会话 GET，页面特征命中；就是官方冒烟"等首页稳定 200"的做法）；
 # 2) 核心把插件标成 running healthy（核心自己的插件接口）。
-# 最多等 90 秒，超时如实报错停下。
+# 会话先刷新：正式套件第 6 项会先重装，核心重建后旧会话失效（SMOKE_JAR 里是死 cookie），
+# 主人令牌（SMOKE_TOKEN）是静态凭据，重新 POST 登进核心换新会话。最多等 90 秒，超时如实报错停下。
 wait_plugin_ready() {
-  local waited=0 page ok
-  while (( waited < 90 )); do
+  [[ -n "${SMOKE_JAR:-}" && -n "${SMOKE_BASE:-}" && -n "${SMOKE_TOKEN:-}" ]] ||
+    { echo "缺冒烟变量：需要 SMOKE_JAR/SMOKE_BASE/SMOKE_TOKEN" >&2; return 1; }
+  local deadline=$((SECONDS + 90)) page
+  while (( SECONDS < deadline )); do
+    curl -sS --noproxy '*' -m 10 -o /dev/null -b "$SMOKE_JAR" -c "$SMOKE_JAR" \
+      --data-urlencode "token=$SMOKE_TOKEN" "$SMOKE_BASE/_wonton/login" 2>/dev/null || true
     page="$(curl -sS --noproxy '*' -m 10 -b "$SMOKE_JAR" "$(web_origin)/" 2>/dev/null || true)"
-    ok=0
     if [[ -n "$page" ]] && web_assert <<<"$page" 2>/dev/null; then
       if smoke_api GET /_wonton/api/plugins 2>/dev/null | python3 -c '
 import json, sys
@@ -61,12 +65,10 @@ plugins = json.load(sys.stdin)["plugins"]
 p = next((p for p in plugins if p["id"] == "app.spliit.spliit"), {})
 s = p.get("status") or {}
 raise SystemExit(0 if s.get("state") == "running" and s.get("health") == "healthy" else 1)' 2>/dev/null; then
-        ok=1
+        return 0
       fi
     fi
-    (( ok == 1 )) && return 0
     sleep 2
-    waited=$((waited + 2))
   done
   echo "等了 90 秒应用页面经网关还打不开或核心没把插件标成 running healthy"
   return 1
