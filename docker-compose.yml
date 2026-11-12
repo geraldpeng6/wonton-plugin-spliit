@@ -1,78 +1,117 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。改成自己的应用见 https://github.com/wontonapp/wonton-docs/blob/main/develop.md#写插件。
+# Spliit：和亲友 AA 分账（Splitwise 的开源替代）。应用没有账号体系，群组靠链接分享，
+# 所以网页走 sso: none；数据全在 Postgres。上游镜像由官方 Actions 发布（ghcr.io/spliit-app/spliit）。
+name: spliit
+
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.31.8-alpine@sha256:713fc2ebfd92e8217db451477182ee91944b123d2b1ee9fd5a8c6e91ca6c3a11
+  db:
+    # postgres:17.6-alpine3.22，官方镜像多架构 index 摘要（docker buildx imagetools inspect）。
+    # 版本照上游 e2e 实测用的 postgres 17 系（上游 compose.yaml 写 latest，不采）。
+    # 大版本升级要迁移数据，dependabot.yml 里已忽略 postgres 的大版本。
+    image: postgres:17.6-alpine3.22@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    # 官方 postgres alpine 镜像的 postgres 用户固定 uid 999，镜像不认 PUID/PGID；
+    # 按数据目录属主规则写数字 uid:gid，数据目录直接归 999，initdb 免 chown。
+    user: "999:999"
     environment:
-      # 网关代登录：SSI 回显的 Remote-User 只信核心带来的。官方镜像启动时对 templates 目录里的
-      # *.template 做 envsubst，把下面的地址换进 nginx 配置（见 web/default.conf.template）。
-      WONTON_CORE_ADDRESS: ${WONTON_CORE_ADDRESS}
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
-    configs:
-      - source: site
-        target: /etc/nginx/templates/default.conf.template
-      - source: page
-        target: /usr/share/nginx/html/index.html
-      - source: tokens
-        target: /usr/share/nginx/html/tokens.css
+      POSTGRES_USER: postgres
+      POSTGRES_DB: spliit
+      POSTGRES_PASSWORD: ${WONTON_SECRET_POSTGRES_PASS}
+    volumes:
+      - ${WONTON_APP_DATA}/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d spliit"]
       interval: 30s
       timeout: 5s
       start_period: 30s
-      start_interval: 1s
+      start_interval: 2s
 
-configs:
-  site:
-    file: web/default.conf.template
-  page:
-    file: web/index.html
-  tokens:
-    file: web/tokens.css
+  web:
+    image: ghcr.io/spliit-app/spliit:1.30.0@sha256:cfaf0f84ef4f11cd3e4c46329039a0f1f51a7d7bf8cc218bf7c1b366e58a99f1
+    environment:
+      # 两个必填变量（上游 env.ts 用 zod 校验缺了启动失败）。
+      POSTGRES_PRISMA_URL: postgresql://postgres:${WONTON_SECRET_POSTGRES_PASS}@db:5432/spliit
+      POSTGRES_URL_NON_POOLING: postgresql://postgres:${WONTON_SECRET_POSTGRES_PASS}@db:5432/spliit
+      # 公网地址：群组链接等对外地址按它拼，核心注入的网页地址不含路径。
+      BASE_URL: ${WONTON_APP_URL}
+      TZ: ${TZ}
+      # 上游 server.js 自带的配置项：Node 默认 5 秒关掉空闲 keep-alive 连接，比核心网关
+      # 转发池的复用窗口短，空闲连接被上游先关会让带请求体的 POST 撞上死连接（502）。
+      # 拉长后空闲连接由网关先关（转发池 1 秒空闲即回收）。
+      KEEP_ALIVE_TIMEOUT: "120000"
+    depends_on:
+      db:
+        condition: service_healthy
+    # /api/health/readiness 会 SELECT 1：上游 e2e 用它当探针，200 即证明迁移完成、应用在服务。
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health/readiness"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      start_interval: 2s
 
 x-wonton:
-  spec: "0.6"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  spec: "0.11"
+  id: app.spliit.spliit
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
-  icon: icon.svg
+  title:
+    zh: AA 记账（Spliit）
+    en: Expense Sharing (Spliit)
+  description:
+    zh: 和家人朋友聚餐、合租、旅行后 AA 分账：建一个群，谁付了钱记一笔，谁欠谁多少自动算清。
+    en: "Split expenses with family and friends for dinners, shared flats and trips: create a group, log who paid, and see who owes what."
+  icon: icon.png
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
+  screenshots: [screenshots/home.png, screenshots/group.png]
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://spliit.app
+  license: MIT
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [记账, 旅行]
+    en: [Finance, Travel]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      聚餐、合租、旅行要 AA 的时候，建一个群组，把"谁付了钱、花在谁身上"记下来，每个人该收该付、最后怎么转账最省事，都自动算好。
+
+      用法：新建群组（选币种、加成员），把群组链接发给同行的人，大家都能记账；账目和余额全群可见。
+
+      不用注册账号：打开就是自己的群组列表（存在浏览器里），换设备时用群组链接再进一次。
+
+      和云吞的关系：家里人打开就能用；不在家里的同行朋友，用云吞的好友分享把插件分享给他，他凭群组链接进群记账。
+
+      已知限制：群组删除和收据识别（要接 OpenAI）按上游默认是关闭的；汇率换算由设备浏览器自己向公开汇率接口查询。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      When a dinner, a shared flat or a trip needs splitting up, create a group, log who paid for whom, and the app works out everyone's balance and the simplest way to settle up.
+
+      How to use: create a group (pick a currency, add members), send the group link to your travel companions, and everyone can add expenses; balances are visible to the whole group.
+
+      No accounts: opening the page shows your groups (kept in your browser); on a new device, re-enter through the group link.
+
+      In Wonton: family members just open it. For friends outside the household, share the plugin with them via Wonton's friend sharing; they join a group through its link.
+
+      Known limits: group deletion and receipt scanning (needs OpenAI) follow the upstream default and are off; currency conversion is fetched by your device's browser from a public rates service.
+  release_notes:
+    zh: "首个版本：Spliit 1.30.0。"
+    en: "First release: Spliit 1.30.0."
   webui:
     service: web
-    port: 80
-    # 示例页回显网关注入的用户名，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#网关代登录sso-proxy。
-    sso: proxy
-    proxy:
-      headers:
-        Remote-User: "{user}"
-  # 能放进侧边栏“我的应用”的页面，见 https://github.com/wontonapp/wonton-docs/blob/main/plugin-spec.md#应用页面tabs。放不放由用户决定。
+    port: 3000
+    # 应用没有账号体系，打开即用；网关挡在前面，陌生人进不来。
+    sso: none
+    # 群组链接要发给家里人以外的人（同行朋友），声明好友分享。
+    friends: true
   tabs:
     - id: home
-      title: { zh: 主页, en: Home }
+      title: { zh: 记账, en: Expenses }
       icon: tabs/home.svg
       icon_selected: tabs/home-fill.svg
       path: /
-      # 这个页面没做适配，用默认的 inset：从状态栏下沿开始，页面不用管安全区。
-      # 想让内容从状态栏后面滚过，写 layout: edge-to-edge，并用 --wonton-inset-* 留出系统安全区的位置。
   permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+  # 数据库密码由核心生成注入，不写死。
+  secrets:
+    postgres_pass:
+      generate: { bytes: 32 }
+  # 应用容器不写本地盘，数据全在 Postgres；容器不出网（汇率由浏览器端查询）。
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    # 上游没写最低值；本机空闲实测 web 91M + db 28M ≈ 120M（2026-11-12，Spliit 1.30.0），按页面上量取 256M。
+    memory: 256M
