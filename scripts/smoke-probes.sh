@@ -8,6 +8,8 @@
 # 变量：SMOKE_WEB_URL 应用网页入口；拼 API 路径用 SMOKE_WEB_ORIGIN。
 # tRPC 请求要过网关，带核心会话 cookie（-b "$SMOKE_JAR"）；curl 默认不带 Origin/Sec-Fetch-*，
 # 网关对无 Origin 的请求按同源处理（插件规范“网关代登录”一节）。
+# 所有 curl 一律 --noproxy '*'：正式冒烟环境里调方会导出 https_proxy（给 gh/git 用的本地代理），
+# 代理不认 *.wonton.localhost，被它截走的请求会回 502——r1/r2/r5 的"第 6 项 502"就是这么来的。
 # dev.sh probes 只给 smoke_api/会话助手，不注入 SMOKE_WEB_URL；真正的 smoke 套件才注入。
 # 优先用套件给的 SMOKE_WEB_URL/SMOKE_WEB_ORIGIN，没有就从核心的插件列表拿网页地址推导 origin。
 web_origin() {
@@ -35,12 +37,12 @@ export SMOKE_NOTE="Spliit 没有用户/账号体系（tRPC 全部匿名 baseProc
 
 # tRPC 的返回是 [{result:{data:{json:…}}}]；批量请求体是 {"0":{"json":<superjson input>}}。
 _trpc_get() { # <procedure> <input JSON>：带会话 GET，输出响应体
-  curl -fsS -b "$SMOKE_JAR" -G "$(web_origin)/api/trpc/$1" \
+  curl -fsS --noproxy '*' -b "$SMOKE_JAR" -G "$(web_origin)/api/trpc/$1" \
     --data-urlencode "batch=1" --data-urlencode "input={\"0\":{\"json\":$2}}"
 }
 
 _trpc_post() { # <procedure> <input JSON>：带会话 POST，输出响应体
-  curl -fsS -b "$SMOKE_JAR" -H 'Content-Type: application/json' \
+  curl -fsS --noproxy '*' -b "$SMOKE_JAR" -H 'Content-Type: application/json' \
     -d "{\"0\":{\"json\":$2}}" "$(web_origin)/api/trpc/$1?batch=1"
 }
 
